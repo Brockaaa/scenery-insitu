@@ -254,7 +254,7 @@ void main() {
         int num_samples = 0;
 
         while (!samplesComplete) {
-            // Looping across all input supersegments (= samples)
+            // Looping across ll input supersegments (= samples)
             transparentSample = false;
             num_samples++;
 

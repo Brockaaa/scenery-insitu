@@ -243,6 +243,7 @@ class VDICompressionBenchmarks {
 //            compressedColor = compressedColor.slice()
 
             var depthCompressedSize = compressor.compress(compressedDepth!!, depth, level, compressionTool)
+            //check out limitation!
             compressedDepth.limit(depthCompressedSize.toInt())
 //            compressedDepth = compressedDepth.slice()
 

@@ -505,7 +505,7 @@ class DistributedVolumes: SceneryBase("DistributedVolumeRenderer", windowWidth =
         logger.info("Exiting init function!")
 
         basePath = if(isCluster) {
-            "/scratch/ws/1/argupta-vdi_generation/vdi_dumps/"
+            "/scratch/ws/1/anbr392b-test-workspace/argupta-vdi_generation/vdi_dumps/"
         } else {
             "/home/aryaman/TestingData/"
         }
@@ -691,7 +691,7 @@ class DistributedVolumes: SceneryBase("DistributedVolumeRenderer", windowWidth =
         }
 
         basePath = if(isCluster) {
-            "/scratch/ws/1/argupta-vdi_generation/vdi_dumps/"
+            "/scratch/ws/1/anbr392b-test-workspace/argupta-vdi_generation/vdi_dumps/"
         } else {
             "/home/aryaman/TestingData/"
         }
@@ -907,7 +907,7 @@ class DistributedVolumes: SceneryBase("DistributedVolumeRenderer", windowWidth =
 //            logger.info("Gather took: ${end/1e9}")
 
 
-            if(saveFinal && (rank == 0)) {
+            if(saveFinal /*&& (rank == 0)*/) {
                 val file = FileOutputStream(File(basePath + "${dataset}vdi_${windowWidth}_${windowHeight}_${maxSupersegments}_0_dump$vdisGathered"))
                 VDIDataIO.write(vdiData, file)
                 logger.info("written the dump $vdisGathered")
