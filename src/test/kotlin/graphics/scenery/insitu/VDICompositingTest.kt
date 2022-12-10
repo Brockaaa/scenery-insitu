@@ -9,6 +9,7 @@ import graphics.scenery.compute.ComputeMetadata
 import graphics.scenery.textures.Texture
 import graphics.scenery.utils.Image
 import graphics.scenery.utils.SystemHelpers
+import graphics.scenery.volumes.vdi.VDICompressor
 import graphics.scenery.volumes.vdi.VDIDataIO
 import net.imglib2.type.numeric.real.FloatType
 import org.joml.Matrix4f
@@ -20,6 +21,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.system.measureNanoTime
 
 class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, windowHeight = 720, wantREPL = false) {
 
@@ -58,6 +60,10 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
     var basePath = ""
     val benchmarking = false
 
+    var startTime : Long = 0
+
+    var currentIteration : Int = 0
+
     @Volatile
     var rendererConfigured = false
 
@@ -66,8 +72,20 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
 
     private external fun distributeVDIs(subVDIColor: ByteBuffer, subVDIDepth: ByteBuffer, sizePerProcess: Int, commSize: Int,
                                         colPointer: Long, depthPointer: Long, mpiPointer: Long)
+
+    private external fun distributeCompressedVDIs(compressedSubVDIColor: ByteBuffer, compressedSubVDIDepth: ByteBuffer, colorLimits: IntArray, depthLimits: IntArray, commSize: Int,
+                                                  colPointer: Long, depthPointer: Long, mpiPointer: Long)
+
+    private external fun distributeCompressedVDIsForBenchmark(compressedSubVDIColor: ByteBuffer, compressedSubVDIDepth: ByteBuffer, colorLimits: IntArray, depthLimits: IntArray, commSize: Int,
+                                                  colPointer: Long, depthPointer: Long, mpiPointer: Long, rank : Int, iteration: Int)
+
+
+
+
     private external fun gatherCompositedVDIs(compositedVDIColor: ByteBuffer, compositedVDIDepth: ByteBuffer, compositedVDILen: Int, root: Int, myRank: Int, commSize: Int,
                                               colPointer: Long, depthPointer: Long, mpiPointer: Long)
+
+
 
     override fun init() {
 
@@ -123,7 +141,7 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
         )
 
         basePath = if(isCluster) {
-            "/scratch/ws/1/argupta-vdi_generation/vdi_dumps/"
+            "/scratch/ws/1/anbr392b-test-workspace/argupta-vdi_generation/vdi_dumps/"
         } else {
             "/home/aryaman/TestingData/"
         }
@@ -180,10 +198,12 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
         val compositedColorTex = compositor.material().textures["CompositedVDIColor"]!!
         val compositedDepthTex = compositor.material().textures["CompositedVDIDepth"]!!
 
+        // gets called when the compositor loop finishes, but it finishes as well when the doComposite is set to false
         (renderer as VulkanRenderer).postRenderLambdas.add {
             if(runCompositing) {
+                //this should get executed then the compositing has finished
 
-
+                //fetches texture from GPU
                 val col = fetchTexture(compositedColorTex)
                 val depth = fetchTexture(compositedDepthTex)
 
@@ -212,9 +232,65 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
 
         var compositedSoFar = 0//vdisComposited.get()
         for (i in 1..iterations) {
+            currentIteration = i
+            startTime = System.nanoTime()
 
-            distributeVDIs(subVDIColorBuffer, subVDIDepthBuffer, windowHeight * windowWidth * maxSupersegments * 4 / commSize, commSize, allToAllColorPointer,
-                allToAllDepthPointer, mpiPointer)
+            //for compression, we create 2 new ByteBuffers which contains the original data in N individually compressed segments, each ending with the actual limit of the compressed segment data
+            val compressor = VDICompressor()
+            val compressionTool = VDICompressor.CompressionTool.LZ4;
+            val level = 1
+
+            val maxCompressedColorSize = compressor.returnCompressBound((windowHeight * windowWidth * maxSupersegments * 4 * 4 / commSize).toLong(), compressionTool)
+//            if(rank == 0){
+//                logger.info("Bound: $maxCompressedColorSize for ${(windowHeight * windowWidth * maxSupersegments * 4 * 4 / commSize).toLong()}")
+//            }
+
+            val compressedSubVDIColor: ByteBuffer =   MemoryUtil.memAlloc(maxCompressedColorSize * commSize)
+            val colorLimits = IntArray(commSize)
+            val maxCompressedDepthSize = compressor.returnCompressBound((windowHeight * windowWidth * maxSupersegments * 4 * 2 / commSize).toLong(), compressionTool)
+            val compressedSubVDIDepth: ByteBuffer =   MemoryUtil.memAlloc(maxCompressedDepthSize * commSize)
+            val depthLimits = IntArray(commSize)
+            val segmentSizePerNode = (windowHeight * windowWidth * maxSupersegments * 4  / commSize)
+            var colorLimitSum : Long = 0
+            var depthLimitSum : Long = 0
+
+
+            logger.info("Starting Compression at node $rank")
+            val compressionTime = measureNanoTime {
+                for (i in 0 until commSize) {
+
+                    val limitColor = compressor.compress(
+                        compressedSubVDIColor.position(colorLimitSum.toInt()),
+                        subVDIColorBuffer.limit(segmentSizePerNode * 4 * (i + 1)).position(segmentSizePerNode * 4 * i),
+                        level,
+                        compressionTool
+                    )
+                    //logger.info("TESTING AT $rank PART: ${i+1} BEFORE COMPRESSION LONG IS ${subVDIColorBuffer.getDouble(7676)}")
+                    colorLimits[i] = limitColor.toInt()
+                    colorLimitSum += limitColor
+                    val limitDepth = compressor.compress(
+                        compressedSubVDIDepth.position(depthLimitSum.toInt()),
+                        subVDIDepthBuffer.limit(segmentSizePerNode * (i + 1) * 2).position(segmentSizePerNode * i * 2),
+                        level,
+                        compressionTool
+                    )
+                    depthLimits[i] = limitDepth.toInt()
+                    depthLimitSum += limitDepth
+                }
+                //limit the buffer
+                compressedSubVDIColor.limit(colorLimitSum.toInt())
+                compressedSubVDIDepth.limit(depthLimitSum.toInt())
+            }
+
+            logger.info("Finished Compression at node $rank, #COMP:$rank:$currentIteration:${compressionTime/1e9}#")
+            // we then send these 2 new ByteBuffers to the cpp side, to distribute to the other processes
+
+//            distributeVDIs(subVDIColorBuffer, subVDIDepthBuffer, windowHeight * windowWidth * maxSupersegments * 4 / commSize, commSize, allToAllColorPointer,
+//                allToAllDepthPointer, mpiPointer)
+
+            distributeCompressedVDIs(compressedSubVDIColor, compressedSubVDIDepth, colorLimits, depthLimits, commSize, allToAllColorPointer, allToAllDepthPointer, mpiPointer)
+
+
 
             while (vdisComposited.get() <= compositedSoFar) {
                 Thread.sleep(5)
@@ -258,6 +334,65 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
     }
 
     @Suppress("unused")
+    fun decompressAndUploadForCompositing(compressedVdiSetColour: ByteBuffer, compressedVdiSetDepth: ByteBuffer, colorLimits : IntArray, depthLimits: IntArray) {
+
+//        if(!benchmarking) {
+//            logger.info("Dumping to file in the uploadFromCompositing function")
+//            SystemHelpers.dumpToFile(vdiSetColour, basePath + "CompositingTestSetOfVDI${vdisDistributed.get()}_ndc_col")
+//            SystemHelpers.dumpToFile(vdiSetDepth, basePath + "CompositingTestSetOfVDI${vdisDistributed.get()}_ndc_depth")
+//            logger.info("File dumped")
+//        }
+//        logger.info("At Node $rank: Back in decompress Function and received the limits: ${colorLimits[0]} ${colorLimits[1]} ${colorLimits[2]} ${colorLimits[3]} ")
+
+
+
+        //assume we would decompress here
+        val compressor = VDICompressor()
+        val compressionTool = VDICompressor.CompressionTool.LZ4;
+
+        val segmentSizePerNode = windowHeight * windowWidth * maxSupersegments * 4 /commSize
+        val vdiSetColour : ByteBuffer =  MemoryUtil.memAlloc(segmentSizePerNode * commSize * 4)
+        val vdiSetDepth : ByteBuffer =  MemoryUtil.memAlloc(segmentSizePerNode * commSize * 2)
+
+        var compressedColorPosition = 0
+        var compressedDepthPosition = 0
+
+        val decompressionTime = measureNanoTime {
+
+            for(i in 0 until commSize){
+                val colorDecompressedSize =  compressor.decompress(vdiSetColour.position(segmentSizePerNode * 4 * i), compressedVdiSetColour.position(compressedColorPosition).limit(compressedColorPosition + colorLimits[i]), compressionTool)
+    //            logger.info("At Node $rank Colorsize after decompression is ${colorDecompressedSize} and pos ${vdiSetColour.position()}, expected Size was ${(windowHeight * windowWidth * maxSupersegments * 4 * 4 / commSize)}")
+
+                logger.info("TESTING AT $rank PART: ${i+1} BEFORE COMPRESSION LONG IS ${vdiSetColour.getDouble(7676)}")
+                compressedColorPosition += colorLimits[i]
+                val depthDecompressedSize =  compressor.decompress(vdiSetDepth.position(segmentSizePerNode * 2 * i), compressedVdiSetDepth.position(compressedDepthPosition).limit(compressedDepthPosition + depthLimits[i]), compressionTool)
+    //            logger.info("At Node $rank  DepthSize after decompression is ${depthDecompressedSize} and pos ${vdiSetDepth.position()},, expected Size was ${(windowHeight * windowWidth * maxSupersegments * 4 * 2 / commSize)}")
+                compressedDepthPosition += depthLimits[i]
+
+            }
+
+        }
+
+        val completeTime = System.nanoTime() - startTime
+
+
+        logger.info("Finished decompression at node $rank, #DECOM:$rank:$currentIteration:${decompressionTime/1e9}#")
+        logger.info("Finished iteration at node $rank, #IT:$rank:$currentIteration:${completeTime / 1e9}#")
+
+
+
+        compositor.material().textures["VDIsColor"] = Texture(Vector3i(maxSupersegments, windowHeight, windowWidth), 4, contents = vdiSetColour.position(0), usageType = hashSetOf(Texture.UsageType.LoadStoreImage, Texture.UsageType.Texture),
+            type = FloatType(), mipmap = false, normalized = false, minFilter = Texture.FilteringMode.NearestNeighbour, maxFilter = Texture.FilteringMode.NearestNeighbour)
+
+
+        compositor.material().textures["VDIsDepth"] = Texture(Vector3i(2 * maxSupersegments, windowHeight, windowWidth), 1, contents = vdiSetDepth.position(0), usageType = hashSetOf(Texture.UsageType.LoadStoreImage, Texture.UsageType.Texture),
+            type = FloatType(), mipmap = false, normalized = false, minFilter = Texture.FilteringMode.NearestNeighbour, maxFilter = Texture.FilteringMode.NearestNeighbour)
+
+
+        vdisDistributed.incrementAndGet()
+    }
+
+    @Suppress("unused")
     fun stopRendering() {
         renderer?.shouldClose = true
     }
@@ -269,4 +404,12 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
         }
     }
 
+    fun logRank0(txt : String) {
+        if(rank == 0){
+            logger.info(txt)
+        }
+
+    }
+
 }
+
