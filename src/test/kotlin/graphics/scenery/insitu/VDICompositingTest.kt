@@ -64,6 +64,10 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
 
     var currentIteration : Int = 0
 
+    //settings
+    val isBenchmark = true
+    val isCompressed = false
+
     @Volatile
     var rendererConfigured = false
 
@@ -72,6 +76,9 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
 
     private external fun distributeVDIs(subVDIColor: ByteBuffer, subVDIDepth: ByteBuffer, sizePerProcess: Int, commSize: Int,
                                         colPointer: Long, depthPointer: Long, mpiPointer: Long)
+
+    private external fun distributeVDIsForBenchmark(subVDIColor: ByteBuffer, subVDIDepth: ByteBuffer, sizePerProcess: Int, commSize: Int,
+                                        colPointer: Long, depthPointer: Long, mpiPointer: Long, rank : Int, iteration: Int)
 
     private external fun distributeCompressedVDIs(compressedSubVDIColor: ByteBuffer, compressedSubVDIDepth: ByteBuffer, colorLimits: IntArray, depthLimits: IntArray, commSize: Int,
                                                   colPointer: Long, depthPointer: Long, mpiPointer: Long)
@@ -236,6 +243,9 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
             // global start time to get the complete time needed
             startTime = System.nanoTime()
 
+            if(isCompressed){
+
+
 
             val compressor = VDICompressor()
             val compressionTool = VDICompressor.CompressionTool.LZ4;
@@ -289,14 +299,15 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
 
             logger.info("Finished Compression at node $rank, #COMP:$rank:$currentIteration:${compressionTime/1e9}#")
 
-
-//            distributeVDIs(subVDIColorBuffer, subVDIDepthBuffer, windowHeight * windowWidth * maxSupersegments * 4 / commSize, commSize, allToAllColorPointer,
-//                allToAllDepthPointer, mpiPointer)
-
             // give them the other compressed buffers and all the limits
-            distributeCompressedVDIs(compressedSubVDIColor, compressedSubVDIDepth, colorLimits, depthLimits, commSize, allToAllColorPointer, allToAllDepthPointer, mpiPointer)
+            distributeCompressedVDIsForBenchmark(compressedSubVDIColor, compressedSubVDIDepth, colorLimits, depthLimits, commSize, allToAllColorPointer, allToAllDepthPointer, mpiPointer, rank, i)
 
+            } else {
+                // no compression
 
+                distributeVDIsForBenchmark(subVDIColorBuffer, subVDIDepthBuffer, windowHeight * windowWidth * maxSupersegments * 4 / commSize, commSize, allToAllColorPointer,
+                allToAllDepthPointer, mpiPointer, rank, currentIteration)
+            }
 
             while (vdisComposited.get() <= compositedSoFar) {
                 Thread.sleep(5)
@@ -321,12 +332,18 @@ class VDICompositingTest: SceneryBase("VDICompositingTest", windowWidth = 1280, 
     @Suppress("unused")
     fun uploadForCompositing(vdiSetColour: ByteBuffer, vdiSetDepth: ByteBuffer) {
 
+        val completeTime = System.nanoTime() - startTime
+        logger.info("Finished iteration at node $rank, #IT:$rank:$currentIteration:${completeTime / 1e9}#")
+
         if(!benchmarking) {
             logger.info("Dumping to file in the uploadFromCompositing function")
             SystemHelpers.dumpToFile(vdiSetColour, basePath + "CompositingTestSetOfVDI${vdisDistributed.get()}_ndc_col")
             SystemHelpers.dumpToFile(vdiSetDepth, basePath + "CompositingTestSetOfVDI${vdisDistributed.get()}_ndc_depth")
             logger.info("File dumped")
         }
+
+
+
 
         compositor.material().textures["VDIsColor"] = Texture(Vector3i(maxSupersegments, windowHeight, windowWidth), 4, contents = vdiSetColour, usageType = hashSetOf(Texture.UsageType.LoadStoreImage, Texture.UsageType.Texture),
             type = FloatType(), mipmap = false, normalized = false, minFilter = Texture.FilteringMode.NearestNeighbour, maxFilter = Texture.FilteringMode.NearestNeighbour)
